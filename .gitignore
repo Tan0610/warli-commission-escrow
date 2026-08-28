@@ -1,0 +1,25 @@
+# Foundry
+out/
+cache/
+broadcast/*/dry-run/
+docs/
+
+# Secrets - never commit these
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+keystore/
+secrets*.json
+
+# Node (optional frontend)
+node_modules/
+.next/
+.vercel/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

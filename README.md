@@ -1,0 +1,202 @@
+# Warli Commission Escrow
+
+> Road to Devcon II — *Art, Culture & Ethereum in India*
+> Problem 1: **The Advance That Never Shows Up**
+
+Kalpana paints Warli scenes on cloth in a village three hours from Nashik. A collector in
+Berlin wants to commission a large piece — good money, the kind that changes a month. But
+the last two times a foreign buyer sent an advance, the agent who arranged it kept most of
+it and Kalpana never saw the rest. The collector has her own worry: wiring money to someone
+she has never met, for a painting that does not exist yet, with no way to get it back if it
+never arrives.
+
+`CommissionEscrow` makes the money itself hold the promise. It is locked in the contract
+the moment the deal is struck, it can only reach Kalpana after delivery is confirmed
+on-chain, and it returns to the collector automatically if the deadline passes with nothing
+delivered. No agent ever touches it, and neither party has to trust the other.
+
+---
+
+## The commission lifecycle
+
+```
+                      openCommission()  [collector sends msg.value]
+                              │
+                              ▼
+                          ┌────────┐
+                          │ Funded │  money locked in the contract
+                          └────────┘
+                          │        │
+        artisan:          │        │      anyone, after deadline:
+        markDelivered()   │        │      refundAfterDeadline()
+                          ▼        ▼
+                   ┌───────────┐  ┌──────────┐
+                   │ Delivered │  │ Refunded │  ◄── TERMINAL
+                   └───────────┘  └──────────┘     collector made whole
+                    │         │
+   collector:       │         │   artisan, after the review window:
+   confirmDelivery()│         │   claimAfterReviewWindow()
+                    ▼         ▼
+                   ┌────────────┐
+                   │  Released  │  ◄── TERMINAL, artisan paid
+                   └────────────┘
+
+   From Funded or Delivered, either party may raiseDispute()
+                              │
+                              ▼
+                        ┌──────────┐
+                        │ Disputed │  only a neutral arbiter can settle
+                        └──────────┘
+                              │  resolveDispute(artisanShareBps)
+                              ▼
+                    Released  or  Refunded   ◄── TERMINAL
+```
+
+### Step by step
+
+| Step | Who | What happens |
+|---|---|---|
+| `openCommission(artisan, deadline, reviewWindow, briefURI)` | collector | The payment is transferred into the contract in the same transaction. The recorded amount **is** `msg.value` — there is no amount argument. Status → `Funded`. |
+| `markDelivered(id)` | artisan | Sets the delivery-confirmation state. **Moves no money.** Status → `Delivered`, clock starts on the review window. |
+| `confirmDelivery(id)` | collector | The collector confirms the piece arrived. Status → `Released`, artisan paid. |
+| `claimAfterReviewWindow(id)` | artisan | If the collector never confirms and never disputes, the artisan may claim once the review window elapses. Still requires `Delivered`. |
+| `refundAfterDeadline(id)` | anyone | Once the deadline passes with the commission still `Funded`, the escrow returns to the collector. |
+| `raiseDispute(id)` | collector or artisan | Either party can flag a disagreement. Moves no money; hands the decision to the arbiter. |
+| `resolveDispute(id, artisanShareBps)` | arbiter only | A neutral third party splits the escrow. `0` refunds the collector in full, `10000` pays the artisan in full, anything between splits it. |
+| `withdrawPending()` | anyone owed | Pulls a payout that a direct transfer could not deliver. |
+
+`Released` and `Refunded` are terminal. Every state-changing entry point loads the
+commission through `_open()`, which reverts on a settled commission — so nothing can pay
+out twice.
+
+---
+
+## The guarantees, and how they are enforced
+
+### The money is locked before work begins
+
+`openCommission` is `payable` and reverts with `NoValueLocked` if `msg.value == 0`. A
+commission cannot exist in a funded-looking state without the contract actually holding the
+funds. `lockedAmount(id)` and `totalEscrowed` make that provable to both parties on-chain.
+
+### Release is gated on a delivery state, not on who calls first
+
+Payment can only be reached from `Delivered`. There is no function anywhere that pays the
+artisan out of `Funded` — not for the collector, not for the artisan, not for the admin.
+`test_NoPayoutIsPossibleBeforeDeliveryIsMarked` asserts exactly this from both directions.
+
+The collector cannot skip or override the delivery state to force a release, and the
+artisan cannot be paid for work they never marked as delivered.
+
+The one asymmetry worth naming: a collector who simply goes silent could otherwise strand a
+finished painting forever. `claimAfterReviewWindow` fixes that, and it is still gated on
+`Delivered` — silence is not a way to avoid paying for work that was delivered.
+
+### State is written before any external call
+
+Every payout goes through `_release`, `_refund`, or `resolveDispute`, and all three follow
+the same order:
+
+```solidity
+c.status = Status.Released;   // terminal state written
+c.amount = 0;                 // balance zeroed
+totalEscrowed -= amount;      // accounting updated
+_payOut(artisan, amount);     // ONLY THEN the external call
+```
+
+A malicious receiver that re-enters from its `receive()` finds a settled commission with a
+zero balance and nothing to take. `nonReentrant` sits on every external entry point as a
+second, independent barrier. Two tests exercise it: one where a re-entrant artisan tries to
+be paid twice for its own commission, and one where it tries to drain a *different*
+collector's commission held in the same contract.
+
+### The deadline always leads somewhere
+
+`refundAfterDeadline` is callable by **anyone** once the deadline passes on a still-`Funded`
+commission, because the funds can only ever go to the collector. Making it permissionless
+keeps the escape hatch reachable even if the collector cannot send a transaction.
+
+It is deliberately unreachable from `Delivered`: a collector must not be able to wait out
+the clock on work that actually arrived.
+
+### Disputes are never settled by either party alone
+
+`resolveDispute` carries two independent guards:
+
+1. `onlyRole(ARBITER_ROLE)` — the caller must be the designated neutral party.
+2. An explicit neutrality check that reverts with `ArbiterMustBeNeutral` if the caller is
+   the collector or the artisan on *this* commission — even if they somehow hold the role.
+
+The second guard is tested by granting the collector `ARBITER_ROLE` and confirming they
+still cannot settle their own dispute. The arbiter is a role rather than a fixed address
+precisely so it can be a multisig or a DAO.
+
+**Trust assumption, stated plainly:** a disputed commission needs the arbiter to act. That
+is the one place this design depends on a third party, and it is limited to the disputed
+case — the happy path, the silent-collector path, and the deadline path all settle without
+anyone's permission.
+
+### Nothing gets stuck
+
+If a payout transfer fails — a party using a contract wallet that reverts on receive — the
+commission still settles and the money is credited to `pendingWithdrawals` for them to pull
+later. A hostile fallback can never revert a settlement or hold a commission open.
+`isSolvent()` asserts the contract's balance always covers `totalEscrowed + totalPending`.
+
+---
+
+## Tests
+
+```
+forge test -vv
+```
+
+35 tests, grouped under headings matching the guarantees above.
+
+| Guarantee | Tests |
+|---|---|
+| Funds locked at creation | `test_OpeningACommissionLocksTheMoneyImmediately`, `test_CannotOpenACommissionWithoutSendingValue` |
+| Release requires confirmed delivery | `test_NoPayoutIsPossibleBeforeDeliveryIsMarked`, `test_ConfirmedDeliveryPaysTheArtisan`, `test_OnlyTheArtisanCanMarkDelivered`, `test_OnlyTheCollectorCanConfirmDelivery`, `test_ArtisanCanClaimAfterAReviewWindowOfSilence` |
+| State before external transfer | `test_ReentrantArtisanCannotBePaidTwice`, `test_ReentrancyCannotDrainAnotherCommission`, `test_SettlementSurvivesARecipientThatRejectsEther` |
+| Timeout refund path | `test_RefundAfterDeadlineReturnsTheMoneyToTheCollector`, `test_NoRefundBeforeTheDeadline`, `test_AnyoneCanTriggerTheRefundButOnlyTheCollectorIsPaid`, `test_DeliveredWorkCannotBeRefundedByWaitingOutTheDeadline` |
+| Neutral dispute resolution | `test_EitherPartyCanRaiseADisputeButNeitherCanSettleIt`, `test_APartyHoldingTheArbiterRoleStillCannotSettleTheirOwnDispute`, `test_ArbiterCanAwardTheArtisanInFull`, `test_ArbiterCanRefundTheCollectorInFull`, `test_ArbiterCanSplitTheEscrow` |
+| Amount comes from `msg.value` | `testFuzz_StoredAmountAlwaysEqualsMsgValue`, `test_PayoutEqualsTheValueThatWasSent` |
+| No double release | `test_ConfirmingTwiceDoesNotPayTwice`, `test_RefundingTwiceDoesNotRefundTwice`, `test_ASettledCommissionIsClosedToEveryPath`, `test_ResolvingADisputeTwiceReverts` |
+| Value conservation (fuzz) | `testFuzz_DisputeSplitConservesTheEscrow`, `test_ContractStaysSolventAcrossManyCommissions` |
+
+---
+
+## Build and deploy
+
+Requires [Foundry](https://getfoundry.sh).
+
+```bash
+git clone --recursive <this repo>   # --recursive: forge-std and OpenZeppelin are submodules
+cd warli-commission-escrow
+forge build
+forge test
+```
+
+Deploying to Base Sepolia:
+
+```bash
+cp .env.example .env                 # then edit; .env is gitignored
+cast wallet import devcon --interactive      # encrypted keystore, no raw key on disk
+forge script script/Deploy.s.sol:Deploy \
+  --rpc-url base_sepolia --account devcon --broadcast --verify
+```
+
+No private key, API key, or authenticated URL is stored in this repository. `.env` is
+gitignored; `.env.example` contains placeholders only, and the deploy script takes its
+signer from the forge invocation rather than from a file.
+
+---
+
+## Stack
+
+Solidity 0.8.28 · Foundry · OpenZeppelin v5.1.0 (`AccessControl`, `ReentrancyGuard`) ·
+Base Sepolia.
+
+## License
+
+MIT
