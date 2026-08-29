@@ -22,7 +22,7 @@ contract ReentrantArtisan {
     }
 
     function markDelivered() external {
-        escrow.markDelivered(commissionId);
+        escrow.markDelivered(commissionId, "ipfs://delivery-photos");
     }
 
     function claim() external {
@@ -66,7 +66,7 @@ contract RejectingParty {
     }
 
     function markDelivered(uint256 id) external {
-        escrow.markDelivered(id);
+        escrow.markDelivered(id, "ipfs://delivery-photos");
     }
 
     receive() external payable {

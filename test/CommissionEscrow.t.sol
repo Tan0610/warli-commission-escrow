@@ -53,7 +53,7 @@ contract CommissionEscrowTest is Test {
     function _openAndDeliver() internal returns (uint256 id) {
         id = _open();
         vm.prank(kalpana);
-        escrow.markDelivered(id);
+        escrow.markDelivered(id, "ipfs://delivery-photos");
     }
 
     // =================================================================
@@ -159,16 +159,75 @@ contract CommissionEscrowTest is Test {
         assertEq(escrow.totalEscrowed(), 0);
     }
 
+    /// @notice Delivery cannot be asserted into existence. Without evidence attached the
+    ///         claim does not enter the record at all, so the review-window clock never
+    ///         starts and the artisan cannot be paid off a bare assertion.
+    function test_DeliveryCannotBeMarkedWithoutEvidence() public {
+        uint256 id = _open();
+
+        vm.prank(kalpana);
+        vm.expectRevert(abi.encodeWithSelector(CommissionEscrow.DeliveryEvidenceRequired.selector, id));
+        escrow.markDelivered(id, "");
+
+        assertEq(uint8(escrow.statusOf(id)), uint8(CommissionEscrow.Status.Funded), "still not delivered");
+
+        // And with no Delivered state, no payout path is open.
+        vm.warp(block.timestamp + REVIEW + 1);
+        vm.prank(kalpana);
+        vm.expectRevert();
+        escrow.claimAfterReviewWindow(id);
+        assertEq(kalpana.balance, 0);
+    }
+
+    /// @notice The evidence is recorded and timestamped, so the collector has something
+    ///         specific to inspect and an arbiter has the artisan's own submission.
+    function test_DeliveryEvidenceIsRecordedAndTimestamped() public {
+        uint256 id = _open();
+
+        vm.prank(kalpana);
+        escrow.markDelivered(id, "ipfs://bafy-finished-cloth-photos");
+
+        (string memory uri, uint64 submittedAt) = escrow.deliveryEvidence(id);
+        assertEq(uri, "ipfs://bafy-finished-cloth-photos");
+        assertEq(submittedAt, uint64(block.timestamp));
+
+        CommissionEscrow.Commission memory c = escrow.getCommission(id);
+        assertEq(c.deliveryEvidenceURI, "ipfs://bafy-finished-cloth-photos");
+    }
+
+    /// @notice A collector who disputes does so against a specific, timestamped claim
+    ///         rather than a bare flag, and the arbiter can rule against the artisan.
+    function test_CollectorCanDisputeTheEvidenceAndTheArbiterCanRuleAgainstTheArtisan() public {
+        uint256 id = _open();
+        uint256 before = collector.balance;
+
+        vm.prank(kalpana);
+        escrow.markDelivered(id, "ipfs://blurry-photo-of-nothing");
+
+        vm.prank(collector);
+        escrow.raiseDispute(id);
+
+        // The evidence survives into the dispute for the arbiter to judge.
+        (string memory uri,) = escrow.deliveryEvidence(id);
+        assertEq(uri, "ipfs://blurry-photo-of-nothing");
+
+        vm.prank(arbiter);
+        escrow.resolveDispute(id, 0); // nothing to the artisan
+
+        assertEq(kalpana.balance, 0, "an unsupported delivery claim earns nothing");
+        assertEq(collector.balance, before + PRICE, "the collector is made whole");
+    }
+
     function test_OnlyTheArtisanCanMarkDelivered() public {
         uint256 id = _open();
 
         vm.prank(collector);
         vm.expectRevert(abi.encodeWithSelector(CommissionEscrow.NotTheArtisan.selector, collector));
-        escrow.markDelivered(id);
+        escrow.markDelivered(id, "ipfs://delivery-photos");
 
         vm.prank(outsider);
         vm.expectRevert(abi.encodeWithSelector(CommissionEscrow.NotTheArtisan.selector, outsider));
-        escrow.markDelivered(id);
+        escrow.markDelivered(id, "ipfs://delivery-photos");
     }
 
     function test_OnlyTheCollectorCanConfirmDelivery() public {
@@ -474,7 +533,7 @@ contract CommissionEscrowTest is Test {
         uint256 id = escrow.openCommission{value: 1.234 ether}(kalpana, deadline, REVIEW, "ipfs://b");
 
         vm.prank(kalpana);
-        escrow.markDelivered(id);
+        escrow.markDelivered(id, "ipfs://delivery-photos");
         vm.prank(collector);
         escrow.confirmDelivery(id);
 
@@ -583,7 +642,7 @@ contract CommissionEscrowTest is Test {
 
         // a: delivered and confirmed
         vm.prank(kalpana);
-        escrow.markDelivered(a);
+        escrow.markDelivered(a, "ipfs://delivery-photos");
         vm.prank(collector);
         escrow.confirmDelivery(a);
 

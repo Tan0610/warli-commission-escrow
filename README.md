@@ -57,7 +57,7 @@ delivered. No agent ever touches it, and neither party has to trust the other.
 | Step | Who | What happens |
 |---|---|---|
 | `openCommission(artisan, deadline, reviewWindow, briefURI)` | collector | The payment is transferred into the contract in the same transaction. The recorded amount **is** `msg.value` — there is no amount argument. Status → `Funded`. |
-| `markDelivered(id)` | artisan | Sets the delivery-confirmation state. **Moves no money.** Status → `Delivered`, clock starts on the review window. |
+| `markDelivered(id, evidenceURI)` | artisan | Submits proof of delivery and sets the delivery-confirmation state. **Moves no money.** Evidence is mandatory. Status → `Delivered`, clock starts on the review window. |
 | `confirmDelivery(id)` | collector | The collector confirms the piece arrived. Status → `Released`, artisan paid. |
 | `claimAfterReviewWindow(id)` | artisan | If the collector never confirms and never disputes, the artisan may claim once the review window elapses. Still requires `Delivered`. |
 | `refundAfterDeadline(id)` | anyone | Once the deadline passes with the commission still `Funded`, the escrow returns to the collector. |
@@ -91,6 +91,33 @@ artisan cannot be paid for work they never marked as delivered.
 The one asymmetry worth naming: a collector who simply goes silent could otherwise strand a
 finished painting forever. `claimAfterReviewWindow` fixes that, and it is still gated on
 `Delivered` — silence is not a way to avoid paying for work that was delivered.
+
+### "Delivered" is a claim on the record, not a bare flag
+
+This is the part that decides whether the collector is actually protected. If
+`markDelivered` were a no-argument boolean the artisan could flip at will, then combined
+with the review window it would amount to: assert delivery, wait seven days, get paid. The
+collector in Berlin would be exactly where she started — money gone, no painting, nicer
+interface.
+
+So evidence is required, not optional. `markDelivered(id, evidenceURI)` reverts with
+`DeliveryEvidenceRequired` on an empty string, and the URI is stored on the commission and
+emitted in `DeliveryMarked`. Consequences:
+
+- Nothing enters the `Delivered` state without a specific, attributable claim attached, so
+  the review-window clock never starts on an empty assertion.
+- The collector has something concrete to inspect before confirming, and something
+  concrete to point at when disputing.
+- If it does reach dispute, the arbiter is shown the artisan's own submission, timestamped
+  by `deliveredAt` and immutable — read it back with `deliveryEvidence(id)`.
+
+The contract cannot verify that a photograph shows the right painting; no contract can.
+What it can do is make a false claim permanent, attributable, and the exact thing an
+arbiter will be handed. That is the difference between a promise and a flag.
+
+Tested by `test_DeliveryCannotBeMarkedWithoutEvidence`,
+`test_DeliveryEvidenceIsRecordedAndTimestamped`, and
+`test_CollectorCanDisputeTheEvidenceAndTheArbiterCanRuleAgainstTheArtisan`.
 
 ### State is written before any external call
 
@@ -151,11 +178,12 @@ later. A hostile fallback can never revert a settlement or hold a commission ope
 forge test -vv
 ```
 
-35 tests, grouped under headings matching the guarantees above.
+38 tests, grouped under headings matching the guarantees above.
 
 | Guarantee | Tests |
 |---|---|
 | Funds locked at creation | `test_OpeningACommissionLocksTheMoneyImmediately`, `test_CannotOpenACommissionWithoutSendingValue` |
+| Delivery is evidenced, not asserted | `test_DeliveryCannotBeMarkedWithoutEvidence`, `test_DeliveryEvidenceIsRecordedAndTimestamped`, `test_CollectorCanDisputeTheEvidenceAndTheArbiterCanRuleAgainstTheArtisan` |
 | Release requires confirmed delivery | `test_NoPayoutIsPossibleBeforeDeliveryIsMarked`, `test_ConfirmedDeliveryPaysTheArtisan`, `test_OnlyTheArtisanCanMarkDelivered`, `test_OnlyTheCollectorCanConfirmDelivery`, `test_ArtisanCanClaimAfterAReviewWindowOfSilence` |
 | State before external transfer | `test_ReentrantArtisanCannotBePaidTwice`, `test_ReentrancyCannotDrainAnotherCommission`, `test_SettlementSurvivesARecipientThatRejectsEther` |
 | Timeout refund path | `test_RefundAfterDeadlineReturnsTheMoneyToTheCollector`, `test_NoRefundBeforeTheDeadline`, `test_AnyoneCanTriggerTheRefundButOnlyTheCollectorIsPaid`, `test_DeliveredWorkCannotBeRefundedByWaitingOutTheDeadline` |

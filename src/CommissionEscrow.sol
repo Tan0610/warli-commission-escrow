@@ -82,6 +82,13 @@ contract CommissionEscrow is AccessControl, ReentrancyGuard {
         uint32 reviewWindow;
         Status status;
         string briefURI;
+        /// @dev What the artisan actually submitted as proof of delivery: photographs of
+        ///      the finished cloth, a courier consignment number, a handover receipt.
+        ///      Pinned off-chain, referenced here. Required, immutable once written, and
+        ///      timestamped by `deliveredAt` — so "delivered" is a claim on the record
+        ///      that the collector and an arbiter can inspect and contest, not a bare
+        ///      boolean the artisan can flip with nothing behind it.
+        string deliveryEvidenceURI;
     }
 
     // ---------------------------------------------------------------------
@@ -120,7 +127,9 @@ contract CommissionEscrow is AccessControl, ReentrancyGuard {
         uint32 reviewWindow,
         string briefURI
     );
-    event DeliveryMarked(uint256 indexed commissionId, address indexed artisan, uint64 deliveredAt);
+    event DeliveryMarked(
+        uint256 indexed commissionId, address indexed artisan, uint64 deliveredAt, string evidenceURI
+    );
     event DeliveryConfirmed(uint256 indexed commissionId, address indexed collector);
     event CommissionReleased(uint256 indexed commissionId, address indexed artisan, uint256 amount);
     event CommissionRefunded(uint256 indexed commissionId, address indexed collector, uint256 amount);
@@ -147,6 +156,7 @@ contract CommissionEscrow is AccessControl, ReentrancyGuard {
     error CommissionDoesNotExist(uint256 commissionId);
     error CommissionAlreadySettled(uint256 commissionId, Status status);
     error WrongStatus(uint256 commissionId, Status actual, Status required);
+    error DeliveryEvidenceRequired(uint256 commissionId);
     error NotTheArtisan(address caller);
     error NotTheCollector(address caller);
     error NotAParty(address caller);
@@ -207,7 +217,8 @@ contract CommissionEscrow is AccessControl, ReentrancyGuard {
             deliveredAt: 0,
             reviewWindow: reviewWindow,
             status: Status.Funded,
-            briefURI: briefURI
+            briefURI: briefURI,
+            deliveryEvidenceURI: "" // written by the artisan at markDelivered
         });
 
         totalEscrowed += msg.value;
@@ -219,17 +230,33 @@ contract CommissionEscrow is AccessControl, ReentrancyGuard {
     // 2. Delivery, and the confirmation that gates every payout
     // ---------------------------------------------------------------------
 
-    /// @notice The artisan marks the work delivered. This does NOT move money: it sets
-    ///         the delivery-confirmation state that every release path requires.
-    function markDelivered(uint256 commissionId) external {
+    /// @notice The artisan marks the work delivered, submitting evidence of it. This does
+    ///         NOT move money: it sets the delivery-confirmation state that every release
+    ///         path requires.
+    /// @dev Evidence is mandatory, and this is the point of the function rather than an
+    ///      extra. A delivery flag the artisan can flip with nothing attached would leave
+    ///      the collector exactly where they started — wiring money abroad on trust, with
+    ///      a nicer interface. Requiring a non-empty `evidenceURI` means the claim is on
+    ///      the record before the review window starts running: the collector has
+    ///      something specific to inspect and dispute, and if it does go to dispute the
+    ///      arbiter has the artisan's own submission, timestamped, to judge against.
+    ///
+    ///      This contract cannot verify that the evidence is truthful — no contract can.
+    ///      What it can do is make the claim costly to make falsely: it is permanent,
+    ///      attributable, and the thing an arbiter will be shown.
+    /// @param evidenceURI Pointer to proof of delivery (IPFS CID, courier tracking record,
+    ///                    signed handover receipt).
+    function markDelivered(uint256 commissionId, string calldata evidenceURI) external {
         Commission storage c = _open(commissionId);
         if (msg.sender != c.artisan) revert NotTheArtisan(msg.sender);
         if (c.status != Status.Funded) revert WrongStatus(commissionId, c.status, Status.Funded);
+        if (bytes(evidenceURI).length == 0) revert DeliveryEvidenceRequired(commissionId);
 
         c.status = Status.Delivered;
         c.deliveredAt = uint64(block.timestamp);
+        c.deliveryEvidenceURI = evidenceURI;
 
-        emit DeliveryMarked(commissionId, msg.sender, uint64(block.timestamp));
+        emit DeliveryMarked(commissionId, msg.sender, uint64(block.timestamp), evidenceURI);
     }
 
     /// @notice The collector confirms the work arrived, releasing payment to the artisan.
@@ -254,8 +281,8 @@ contract CommissionEscrow is AccessControl, ReentrancyGuard {
         if (msg.sender != c.artisan) revert NotTheArtisan(msg.sender);
         if (c.status != Status.Delivered) revert WrongStatus(commissionId, c.status, Status.Delivered);
 
-        uint256 claimableAt = uint256(c.deliveredAt) + c.reviewWindow;
-        if (block.timestamp < claimableAt) revert ReviewWindowNotElapsed(claimableAt, block.timestamp);
+        uint256 claimUnlockAt = uint256(c.deliveredAt) + c.reviewWindow;
+        if (block.timestamp < claimUnlockAt) revert ReviewWindowNotElapsed(claimUnlockAt, block.timestamp);
 
         _release(commissionId, c);
     }
@@ -370,6 +397,18 @@ contract CommissionEscrow is AccessControl, ReentrancyGuard {
 
     function statusOf(uint256 commissionId) external view returns (Status) {
         return _commissions[commissionId].status;
+    }
+
+    /// @notice What the artisan submitted as proof of delivery, and when. Empty until
+    ///         `markDelivered` runs. This is what the collector inspects before
+    ///         confirming, and what an arbiter is shown in a dispute.
+    function deliveryEvidence(uint256 commissionId)
+        external
+        view
+        returns (string memory evidenceURI, uint64 submittedAt)
+    {
+        Commission storage c = _commissions[commissionId];
+        return (c.deliveryEvidenceURI, c.deliveredAt);
     }
 
     /// @notice True once the commission has paid out or refunded and can never move
