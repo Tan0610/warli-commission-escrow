@@ -28,7 +28,7 @@ runs = 512
 
 [profile.default.invariant]
 runs = 256
-depth = 32
+depth = 200
 fail_on_revert = false
 
 [rpc_endpoints]

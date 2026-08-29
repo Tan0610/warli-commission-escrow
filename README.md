@@ -178,7 +178,7 @@ later. A hostile fallback can never revert a settlement or hold a commission ope
 forge test -vv
 ```
 
-38 tests, grouped under headings matching the guarantees above.
+38 unit and fuzz tests grouped under headings matching the guarantees above, plus a stateful invariant suite (see below).
 
 | Guarantee | Tests |
 |---|---|
@@ -191,6 +191,64 @@ forge test -vv
 | Amount comes from `msg.value` | `testFuzz_StoredAmountAlwaysEqualsMsgValue`, `test_PayoutEqualsTheValueThatWasSent` |
 | No double release | `test_ConfirmingTwiceDoesNotPayTwice`, `test_RefundingTwiceDoesNotRefundTwice`, `test_ASettledCommissionIsClosedToEveryPath`, `test_ResolvingADisputeTwiceReverts` |
 | Value conservation (fuzz) | `testFuzz_DisputeSplitConservesTheEscrow`, `test_ContractStaysSolventAcrossManyCommissions` |
+
+---
+
+## Beyond the brief: stateful invariant testing
+
+Worked examples only prove the call orderings the author thought to write down. Checks 3
+and 7 — state written before the external transfer, and no double release — are exactly the
+properties that pass a hand-written test and then break on an interleaving nobody imagined.
+
+`test/CommissionEscrow.invariant.t.sol` drives randomised sequences of every move the three
+parties have: open, submit evidence, confirm, claim after silence, dispute, arbitrate,
+refund at the deadline. **Time moves too** — the handler warps the clock, because the
+refund and review-window paths are only reachable once a deadline has actually passed.
+
+| Invariant | What it rules out |
+|---|---|
+| `balanceEqualsEscrowedPlusPending` | The contract's books drifting from the ETH it holds |
+| `noCommissionSettlesTwice` | Any commission reaching a terminal state more than once |
+| `settledCommissionsAreEmptied` | A settled commission still carrying a balance a second payout could find |
+| `totalEscrowedMatchesTheOpenCommissions` | `totalEscrowed` drifting from the live commissions |
+| `everyFundedWeiIsAccountedFor` | The contract holding more than was ever funded |
+
+The first is an **exact equality**, not a lower bound:
+`balance == totalEscrowed + totalPending`. Any wei that appeared or vanished for any reason
+breaks it on the call that caused it.
+
+```
+Ran 1 test for test/CommissionEscrow.invariant.t.sol:CommissionEscrowInvariantTest
+[PASS] invariant_balanceEqualsEscrowedPlusPending
+[PASS] invariant_everyFundedWeiIsAccountedFor
+[PASS] invariant_noCommissionSettlesTwice
+[PASS] invariant_settledCommissionsAreEmptied
+[PASS] invariant_totalEscrowedMatchesTheOpenCommissions
+ CommissionEscrowInvariantTest invariants (runs: 256, calls: 51200, reverts: 0)
+
+╭---------------+------------------------+-------+---------+----------╮
+| Contract      | Selector               | Calls | Reverts | Discards |
++=====================================================================+
+| EscrowHandler | claimAfterReviewWindow | 6484  | 0       | 0        |
+| EscrowHandler | confirmDelivery        | 6368  | 0       | 0        |
+| EscrowHandler | markDelivered          | 6381  | 0       | 0        |
+| EscrowHandler | openCommission         | 6452  | 0       | 0        |
+| EscrowHandler | passTime               | 6461  | 0       | 0        |
+| EscrowHandler | raiseDispute           | 6372  | 0       | 0        |
+| EscrowHandler | refundAfterDeadline    | 6228  | 0       | 0        |
+| EscrowHandler | resolveDispute         | 6454  | 0       | 0        |
+╰---------------+------------------------+-------+---------+----------╯
+
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 50.36s
+```
+
+256 runs × 200 calls — 51,200 calls, **0 reverts, 0 violations**. Every settlement path
+(confirm, claim, refund, arbitrate) was exercised thousands of times against the same
+commissions, in orders no hand-written test enumerates.
+
+```bash
+forge test --match-contract Invariant -v
+```
 
 ---
 
