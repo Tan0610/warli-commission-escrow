@@ -194,6 +194,39 @@ forge test -vv
 
 ---
 
+## Known limitations
+
+Stated plainly, because a build that hides its edges is harder to trust than one that names
+them.
+
+**A dispute has no timeout.** `raiseDispute` has no deadline check, so either party can
+raise one after the deadline has passed. That moves the commission to `Disputed`, and
+`refundAfterDeadline` then reverts with `WrongStatus` from that point on. Recovery depends
+entirely on the arbiter calling `resolveDispute`; there is no fallback that lets the
+collector reclaim funds if a raised dispute is simply never settled.
+
+This is an accepted trust assumption on the arbiter role — the same role check 5 already
+requires to be independent of both parties — not a fund-loss bug. But it is worth knowing
+before granting `ARBITER_ROLE` to an address that might go unresponsive, and it is the
+argument for that role being a multisig rather than one key.
+
+The alternative — auto-refunding a disputed commission after some longer timeout — was
+considered and rejected: it hands a bad-faith collector a way to dispute delivered work and
+then simply wait, which is a worse failure than an unresponsive arbiter.
+
+**Evidence is a pointer, not a proof.** `markDelivered` requires a non-empty `evidenceURI`
+and records it immutably, but the contract cannot verify that the URI resolves, that it
+resolves to a photograph, or that the photograph shows the right painting. No contract can.
+What it guarantees is that the claim is permanent, attributable, timestamped, and the exact
+artefact an arbiter is handed. Pinning the content (IPFS rather than a mutable https URL)
+is the submitter's responsibility.
+
+**One arbiter role, not per-commission arbiters.** Every commission shares the same
+`ARBITER_ROLE` set. A production version would likely let the two parties agree on a
+specific arbiter at `openCommission` time.
+
+---
+
 ## Beyond the brief: stateful invariant testing
 
 Worked examples only prove the call orderings the author thought to write down. Checks 3
