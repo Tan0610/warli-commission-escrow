@@ -76,7 +76,11 @@ out twice.
 `CommissionEscrow` → [`0xB57A70b874f6B291f3369994B08BD335Acd7343b`](https://sepolia.basescan.org/address/0xB57A70b874f6B291f3369994B08BD335Acd7343b)
 
 Verified by reading the deployed contract back, not from the deploy script's output:
-`TOTAL_BPS()` returns `10000`, `nextCommissionId()` starts at `1`. Addresses, roles and
+`TOTAL_BPS()` returns `10000`, `nextCommissionId()` starts at `1`.
+
+**Source-verified on [Sourcify](https://repo.sourcify.dev/84532/0xB57A70b874f6B291f3369994B08BD335Acd7343b)**
+with an exact match on both creation and runtime bytecode — the deployed code is provably
+the code in this repo, not an address you have to take on trust. Addresses, roles and
 commands to exercise it are in **[DEPLOYMENTS.md](DEPLOYMENTS.md)**.
 
 ---
