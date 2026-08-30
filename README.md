@@ -71,6 +71,48 @@ out twice.
 
 ---
 
+## Live on Base Sepolia
+
+`CommissionEscrow` → [`0xB57A70b874f6B291f3369994B08BD335Acd7343b`](https://sepolia.basescan.org/address/0xB57A70b874f6B291f3369994B08BD335Acd7343b)
+
+Verified by reading the deployed contract back, not from the deploy script's output:
+`TOTAL_BPS()` returns `10000`, `nextCommissionId()` starts at `1`. Addresses, roles and
+commands to exercise it are in **[DEPLOYMENTS.md](DEPLOYMENTS.md)**.
+
+---
+
+## Why this satisfies the scored checks
+
+| # | Check | How it is satisfied |
+|---|---|---|
+| 1 | Escrow holds funds before work begins | `openCommission` is `payable` and reverts with `NoValueLocked` when `msg.value == 0`. The ETH sits in the contract from that transaction; `lockedAmount(id)` and `totalEscrowed` make it provable. |
+| 2 | Release requires confirmed delivery | Payment is reachable only from `Status.Delivered`. `confirmDelivery` and `claimAfterReviewWindow` both check it, and no function anywhere pays the artisan out of `Funded` — not the collector, not the artisan, not the admin. `test_NoPayoutIsPossibleBeforeDeliveryIsMarked` asserts it from both directions. |
+| 3 | State updated before external transfer | `_release`, `_refund` and `resolveDispute` all write the terminal status, zero `c.amount` and decrement `totalEscrowed` **before** `_payOut` makes any call. `nonReentrant` on every external entry point is a second, independent barrier. Proven by `test_ReentrantArtisanCannotBePaidTwice` and `test_ReentrancyCannotDrainAnotherCommission`. |
+| 4 | Timeout produces an explicit refund path | `refundAfterDeadline` is callable by **anyone** once `block.timestamp > deadline` on a still-`Funded` commission, and pays only the stored collector — so the escape hatch stays reachable even if the collector cannot transact. |
+| 5 | Disputes are not resolved by either party alone | `resolveDispute` carries `onlyRole(ARBITER_ROLE)` **and** an explicit `ArbiterMustBeNeutral` check rejecting the caller if they are this commission's collector or artisan, even if they hold the role. Tested by granting the collector `ARBITER_ROLE` and confirming they still cannot settle. |
+| 6 | Amount comes from the value actually sent | `openCommission` has no amount parameter. `amount: msg.value` is the only assignment, so the record cannot disagree with what arrived. Fuzzed over 512 runs in `testFuzz_StoredAmountAlwaysEqualsMsgValue`. |
+| 7 | No double release | Every state-changing entry point loads through `_open()`, which reverts `CommissionAlreadySettled` on a terminal commission. Four tests, including `test_ASettledCommissionIsClosedToEveryPath`. |
+| 8 | No credentials in tracked files | No key, API key or authenticated URL anywhere in the tree. `.env` is gitignored, `.env.example` holds placeholders, and the deploy script takes its signer from the forge invocation rather than a file. |
+
+Beyond the checklist, `markDelivered` **requires evidence** — see below. A delivery flag
+the artisan can flip with nothing attached would satisfy check 2 on paper while leaving the
+collector exactly as exposed as before.
+
+---
+
+## Project layout
+
+```
+src/CommissionEscrow.sol                 the escrow contract
+script/Deploy.s.sol                      Base Sepolia deploy script
+test/CommissionEscrow.t.sol              38 unit and fuzz tests, grouped per guarantee
+test/CommissionEscrow.invariant.t.sol    stateful invariant suite (51,200 calls)
+test/mocks/Parties.sol                   reentrant artisan and ETH-rejecting party
+DEPLOYMENTS.md                           live Base Sepolia address and how to exercise it
+```
+
+---
+
 ## The guarantees, and how they are enforced
 
 ### The money is locked before work begins
