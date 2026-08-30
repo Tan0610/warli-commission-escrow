@@ -37,3 +37,17 @@ cast call 0xB57A70b874f6B291f3369994B08BD335Acd7343b \
 > `ARBITER_ROLE` here, which makes this a demonstration rather than a production instance —
 > a real deployment would put the arbiter behind a multisig, exactly as the contract's
 > role-based design allows.
+
+## Source verification
+
+Verified on **Sourcify** with an exact match on both creation and runtime bytecode:
+
+- https://repo.sourcify.dev/84532/0xB57A70b874f6B291f3369994B08BD335Acd7343b
+
+```bash
+curl -s https://sourcify.dev/server/v2/contract/84532/0xB57A70b874f6B291f3369994B08BD335Acd7343b
+# {"match":"match","creationMatch":"match","runtimeMatch":"match", ...}
+```
+
+Sourcify rather than Basescan because it needs no API key, and Basescan surfaces
+Sourcify-verified sources anyway.
